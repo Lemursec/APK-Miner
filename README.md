@@ -1,5 +1,8 @@
 # Getting started
+
 Install radare2 and adb and make sure the commands are available in your $PATH
+
+Plug in your smartphone and establish the adb connection
 
 ```
 python3 -m venv venv
