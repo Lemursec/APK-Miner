@@ -1,0 +1,6 @@
+venv/
+__pycache__
+target_apps.db
+*.log
+results/*
+!results/.gitkeep
