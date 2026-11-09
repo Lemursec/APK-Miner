@@ -26,11 +26,16 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
 
-# python3 android_apk_downloader.py --start-date "2026-10-04" --end-date "2026-10-04" --find-apks
-# python3 android_apk_downloader.py --start-date "2026-10-04" --end-date "2026-10-04" --find-apks --download-apks
-# python3 android_apk_downloader.py --start-date "2026-10-04" --end-date "2026-10-04" --find-apks --download-apks --analyze-apks
-# python3 android_apk_downloader.py --search-findings        <--  this shows all results in the sqlite db
-# python3 android_apk_downloader.py --search-findings "GLIA" <-- this filters results to only those which contain the provided string
+# usage after adding db logic
+# python3 apk-miner.py  [--start-date "2026-10-04" --end-date "2026-10-04"] --find-apks <-- fetch installed apks on a smartphone instead of searching the local db.
+# python3 apk-miner.py --download-apks          <-- if no --start-date or --end-date is specified, default to downloading all packages in db where downloaded=0
+# python3 apk-miner.py --search-findings        <--  this shows all results in the sqlite db
+# python3 apk-miner.py --search-findings "GLIA" <-- this filters results to only those which contain the provided string
+# python3 apk-miner.py --install-apks [com.android.pkg.name,another.pkg.name]
+#
+# python3 apk-miner.py --start-date 2026-11-06 --end-date 2026-11-07 --find-apks
+# python3 apk-miner.py --download-apks
+# python3 apk-miner.py --analyze-apks
 
 def check_security_txt(website):
     "determine if the target organization has a VDP or bug bounty program"
@@ -53,17 +58,17 @@ def check_security_txt(website):
 
             # Apply the user's specific failure conditions
             if response.status_code == 404 or 'text/plain' not in content_type:
-                security_program = 'No'
+                security_program = 0
                 security_program_details = 'None'
             else:
                 # If it is a 200 OK and text/plain, mark it as Yes
                 program_details = response.text.replace('\r\n', '\n')
-                security_program = 'Yes' if response.status_code == 200 else 'No'
+                security_program = 1 if response.status_code == 200 else 0
                 security_program_details = program_details if response.status_code == 200 else 'None'
 
         except requests.RequestException:
             # Catch DNS failures, timeouts, and connection errors
-            security_program = 'No'
+            security_program = 0
             security_program_details = 'None'
     return security_program, security_program_details
 
@@ -141,48 +146,35 @@ def get_apk_info(pkg_name):
 
 def prune_false_positives(file_path: str):
     "prune false positives from the specified file"
+    print(f"removing false positives from: {file_path}")
     false_pos_lst = [
-        r'.+\[generic apiKey\] apiKey": ""$\n',
-        r'.+\[generic apiKey\] apiKey": "",$\n',
-        r'.+\[generic api_key\] api_key": ""$\n',
-        r'.+\[generic api_key\] api_key": "",$\n',
-        r'.+\[generic api_key\] api_key" />$\n',
-        r'.+\[generic api_key\] API_KEY" android:value=""/>$\n',
-        r'.+\[generic api_key\] API_KEY:Ljava/lang/String; = ""$\n',
-        r'.+\[generic apiKey\] ApiKey" />$\n',
-
-        r'.+\[generic secret\] secret": ""$\n',
-        r'.+\[generic secret\] secret": "",$\n',
-        r'.+\[generic secret\] Secret": ""$\n',
-        r'.+\[generic secret\] Secret": "",$\n',
-        r'.+\[generic secret\] Secret:$\n',
-        r'.+\[generic secret\] SECRET:Ljava/lang/String; = ""$\n',
-
-        r'.+\[generic storageBucket\] storageBucket$\n',
-        r'.+\[generic storageBucket\] StorageBucket$\n',
-
-        r'.+serviceCredentialEnabled": false$\n',
-        r'.+\[GLIA ABEAI Enabled\] abeaiEnabled.+true[,]$\n',
-        r'.+\[GLIA ABEAI Enabled\] abeaiEnabled.+true$\n',
-        r'.+\[GLIA API Key ID\] gliaApiKeyId": "",$\n',
-        r'.+\[GLIA Queue ID\] gliaQueueId": "",$\n',
-        r'.+\[GLIA Options\] gliaOptions": \{$\n',
-        r'.+\[GLIA Direct ID Enabled\] directIdEnabled": false,$\n',
-        r'.+\[GLIA Site ID\] gliaSiteId": "",$\n',
-        r'.+\[GLIA API Key Secret\] gliaApiKeySecret": "",$\n',
-
-        r'.+\[GLIA Site ID\] gliaSiteId$\n',
-        r'.+\[GLIA Options\] GliaOptionsModel.fromJson$\n',
-        r'.+\[GLIA Options\] GliaOptionsModelToJson@\d+$\n',
-        r'.+\[GLIA Options\] GliaOptionsModel$\n',
-        r'.+\[GLIA Options\] gliaOptions$\n',
-        r'.+\[GLIA ABEAI Enabled\] abeaiEnabled$\n',
-        r'.+\[GLIA Direct ID Enabled\] directIdEnabled$\n',
-        r'.+\[GLIA Queue ID\] gliaQueueId$\n',
-        r'.+\[GLIA API Key Secret\] gliaApiKeySecret$\n',
-        r'.+\[GLIA Options\] GliaOptionsModelFromJson@\d+$\n',
-        r'.+\[GLIA API Key ID\] gliaApiKeyId$\n',
-        r'.+\[GLIA Service Credential Enabled] serviceCredentialEnabled$\n'
+        r'^\[generic apiKey\] apiKey": \"\",?\s*$',
+        r'^\[generic apiKey\] api_key": \"\",?\s*$',
+        r'^\[generic (?:api_key\] api_key|apiKey\] ApiKey)" />\s*$'
+        r'^\[generic api_key\] API_KEY" android:value=""/>\s*$',
+        r'^\[generic api_key\] API_KEY:Ljava/lang/String; = ""\s*$',
+        r'^\[generic secret\] (?:[sS]ecret": \"\",?|Secret:|SECRET:Ljava/lang/String; = \"\")\s*$'
+        r'^\[generic storageBucket\] storageBucket\s*$',
+        r'^serviceCredentialEnabled": false\s*$',
+        r'^\[GLIA ABEAI Enabled\] abeaiEnabled.+true[,]\s*$',
+        r'^\[GLIA ABEAI Enabled\] abeaiEnabled.+true\s*$',
+        r'^\[GLIA Direct ID Enabled\] directIdEnabled": false,\s*$',
+        r'^\[GLIA Options\] gliaOptions": \{\s*$',
+        r'^\[GLIA Options\] GliaOptionsModel\.fromJson\s*$',
+        r'^\[GLIA Options\] GliaOptionsModelToJson@\d+\s*$',
+        r'^\[GLIA Options\] GliaOptionsModel\s*$',
+        r'^\[GLIA Options\] gliaOptions\s*$',
+        r'^\[GLIA Options\] GliaOptionsModelFromJson@\d+\s*$',
+        r'^\[GLIA (?:Site ID\] gliaSiteId|Queue ID\] gliaQueueId|API Key ID\] gliaApiKeyId|API Key Secret\] gliaApiKeySecret)\": \"\",?\s*$'
+        r'^\[GLIA Site ID\] gliaSiteId\s*$',
+        r'^\[GLIA ABEAI Enabled\] abeaiEnabled\s*$',
+        r'^\[GLIA Direct ID Enabled\] directIdEnabled\s*$',
+        r'^\[GLIA Queue ID\] gliaQueueId\s*$',
+        r'^\[GLIA API Key Secret\] gliaApiKeySecret\s*$',
+        r'^\[GLIA API Key ID\] gliaApiKeyId\s*$',
+        r'^\[GLIA Service Credential Enabled\] serviceCredentialEnabled\s*$',
+        r'\[Google App ID\] google_app_id" id$',
+        r'\[Google Storage Bucket\] google_storage_bucket" id$'
     ]
 
     compiled_patterns = [re.compile(p) for p in false_pos_lst]
@@ -257,6 +249,58 @@ def get_installed_packages_in_range(start_date, end_date):
 
     return matching_packages
 
+def install_apks(db, pkg_list=""):
+    """install apps on the connected smartphone via adb"""
+    apk_list = []
+    if pkg_list == "":
+        print("\n --- Installing APKs from local database where installed=0 on adb attached phone ---")
+        rows = db.get_rows_where("installed=0")
+        if rows:
+            apk_list = [row["apk_name"] for row in rows]
+    else:
+        print("\n --- Installing specified APKs on adb attached phone  ---")
+        apk_list = pkg_list.split(",")
+
+    for apk in apk_list:
+        print(f"\nInstalling {apk} from Google Play Store...")
+        try:
+            res = subprocess.check_output(
+                ["adb", "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", f"market://details?id={apk}"]
+            ).decode("utf-8", errors="ignore")
+            sleep(1)
+
+            screensize = subprocess.check_output(["adb", "shell", "wm", "size"]).decode("utf-8", errors="ignore")
+            matches = re.findall(r"(\d+)x(\d+)", screensize)
+            if matches:
+                width, height = map(int, matches[-1])
+                x = str(int(float(width) * 0.5))
+                y = str(int(float(height) * 0.52))
+            print(f"dimensions: x: {width}, y: {height}\ttap location: x: {x}, y: {y}")
+            sleep(1)
+
+            res = subprocess.check_output(
+                ["adb", "shell", "input", "tap", x, y]
+            ).decode("utf-8", errors="ignore")
+
+        except Exception as e:
+            print(e)
+
+
+        print("Waiting for APK install to finish on your phone.")
+        key = input("Press any key to continue... or press 'd' to delete this db entry if the app doesn't exist, or is out of scope: ")
+        if key == 'd':
+            db.delete_target(apk)
+            continue
+
+        install_date = str(date.today())
+
+
+        db.set_target(str(apk), {
+            "installed": 1,
+            "install_date": install_date
+        })
+    return
+
 def download_apks_for_package(package_name):
     """Creates directory and pulls all base and split APKs for the target package."""
     # Create target local directory named after the package
@@ -303,13 +347,14 @@ def download_apks_for_package(package_name):
     return
 
 def static_analysis(package_name):
+    logger = logging.getLogger()
     apk_names = [f for f in os.listdir(package_name) if f.endswith(".apk")]
-    print(f"processing: {', '.join(apk_names)}")
+    logger.info(f"processing: {', '.join(apk_names)}")
     all_match_lst = set()
     for p in apk_names:
         #os.makedirs(package_name+"/decompiled/"+p, exist_ok=True)
         try:
-            print(f"starting static analysis on: {p}")
+            logger.info(f"starting static analysis on: {p}")
 
             cmd_result = subprocess.check_output(
                 ["apktool", "d", "-q", f"{package_name}/{p}", "-o", f"{package_name}/decompiled/{p}"]
@@ -329,37 +374,37 @@ def static_analysis(package_name):
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
                 files = d.rglob("*.p12")
                 for file_path in files:
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
                 files = d.rglob("*.jks")
                 for file_path in files:
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
                 files = d.rglob("*.crt")
                 for file_path in files:
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
                 files = d.rglob("*.db")
                 for file_path in files:
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
                 files = d.rglob("*.sqlite")
                 for file_path in files:
                     if file_path.is_file():
                         dest_path = Path(f"{package_name}") / file_path.name
                         shutil.move(file_path, dest_path)
-                        print(f"Moved: {file_path.name} -> {dest_path}")
+                        logger.info(f"Moved: {file_path.name} -> {dest_path}")
 
             # recursive find .json .xml .env in dirs_lst files and append to files_lst
             # plaintext secrets in files
@@ -391,71 +436,89 @@ def static_analysis(package_name):
                 has_matches = None
                 match_lst = set()
                 with open(f, "r", encoding="utf-8") as fh:
-
                    # review each interesting file for sensitive strings
                     sensitive_matchdict = {
-                        "generic api_key": r"api_key[:'\"=].*",
-                        "generic secret": r"secret[:'\"=].*",
-                        "generic apiKey": r"apiKey[:'\"=].*",
-                        "generic storageBucket": r"storageBucket.*",
+                        # AI secrets
+                        "Anthropic API Key - Assignment": r"\bANTHROPIC_API_KEY[\"']?\s*[:=>]\s*[\"']?(sk-ant-api03-[a-zA-Z0-9\-_]{60,100})(?![a-zA-Z0-9\-_])",
+                        "Anthropic API Key - Direct": r"\bsk-ant-api03-[0-9A-Za-z_-]{93}AA\b",
+                        "Anthropic API Key - Legacy": r"\bsk-ant-[a-zA-Z0-9\-_]{20,}\b",
+                        "Anthropic API Key - Modern": r"\bsk-ant-[a-zA-Z0-9\-_]{51,}\b",
+                        "Anthropic API Admin Key": r"\bsk-ant-admin01-[0-9A-Za-z_-]{93}AA\b",
+                        "OpenAI - Modern": r"\bsk-proj-[a-zA-Z0-9\-_]{36,}\b",
+                        "OpenAI - Legacy": r"\bsk-[a-zA-Z0-9]{48}\b",
+                        "OpenAI API Key (Assignment)": r"\bOPENAI_API_KEY[\"']?\s*[:=>]\s*[\"']?(sk-[a-zA-Z0-9\-_]{32,160})(?![a-zA-Z0-9\-_])",
+                        "OpenAI API Key (Direct)": r"\bsk-(?:proj-|svcacct-|admin-)?[0-9A-Za-z_-]{20,74}T3BlbkFJ[0-9A-Za-z_-]{20,74}\b",
 
-                        "GLIA Options": r"gliaOptions.*",
-                        "GLIA Site ID": r"gliaSiteId.*",
-                        "GLIA Queue ID": r"gliaQueueId.*",
-                        "GLIA API Key ID": r"gliaApiKeyId.*",
-                        "GLIA API Key Secret": r"gliaApiKeySecret.*",
-                        "GLIA Site ID": r"gliaSiteId.*",
-                        "GLIA Direct ID Enabled": r"directIdEnabled.*",
-                        "GLIA ABEAI Enabled": r"abeaiEnabled.*",
-                        "GLIA Service Credential Enabled": r"serviceCredentialEnabled.*",
+                        "Grok API Key": r"\bxai-[A-Za-z0-9\-_]{60,120}\b",
+                        "Mistral API Key": r"\bmsk-[A-Za-z0-9]{32}\b",
+                        "DeepSeek API Key": r"\bsk-[A-Za-z0-9]{64}\b",
+                        "Perplexity API Key": r"\bpplx-[A-Za-z0-9]{32,64}\b",
+                        "Databricks API Key": r"\bdapi[0-9a-f]{32}(?:-\d)?",
+                        "Azure Storage Account Access Key": r"(?i)(?:AccountKey|SharedAccessKey)[\w.\-= \:'\"]{0,25}([A-Za-z0-9+/]{86}==)",
+                        "generic storageBucket": r"\bstorage_?bucket[\"']?\s*[:=>]\s*[\"']?([a-z0-9\-\.]{3,63})\b",
+                        "generic x-api-key, api_key, secret, apiKey": r"\b(?:x-api-key|api_?key|secret)[\"']?\s*[:=>]\s*[\"']?([a-zA-Z0-9\-_]{20,150})\b",
 
-                        "Airship URL": r"urbanairship\.com/api.*",
-                        "Airship App Key": r"productionAppKey.*",
-                        "Airship App Secret": r"productionAppSecret.*",
+                        "GLIA": r"\bglia(?:Options|SiteId|QueueId|ApiKeyId)[\"']?\s*[:=>]\s*[\"']?([^\s\"',]{5,150})",
+                        "GLIA Secret":  r"\bgliaApiKeySecret[\"']?\s*[:=>]\s*[\"']?([^\s\"',]{5,150})",
+                        "GLIA Enabled Flags": r"\b(?:directId|abeai|serviceCredential)Enabled[\"']?\s*[:=>]\s*[\"']?([a-zA-Z0-9]{1,10})\b",
 
-                        "Cloudinary": r"cloudinary://.*",
-                        "Firebase URL": r".*firebaseio\.com",
-                        "Slack Token": r"(xox[p|b|o|a]-[0-9]{12}-[0-9]{12}-[0-9]{12}-[a-z0-9]{32})",
+                        "Airship URL": r"\burbanairship\.com/api[^\s\"']{0,200}",
+                        "Airship App Key or Secret": r"\bproductionApp(?:Key|Secret)[\"']?\s*[:=>]\s*[\"']?([A-Za-z0-9]{22})\b",
+                        "Airship": r"(?i)[^\"]*airship[^\"]*\">([^<]+)",
+
+                        "Firebase API Key": r"(?<![a-zA-Z0-9_-])AIza[0-9A-Za-z_-]{35}(?![a-zA-Z0-9_-])",
+                        "Firebase AuthDomain URL": r"\b[a-z\0-9-]{4,64}\.(?:firebaseapp\.com|web\.app)\b",
+                        "Firebase Database URL": r"\b[a-z0-9-]{4,64}\.(?:firebaseio\.com|(?:[a-zA-Z0-9-]+\.)?firebasedatabase\.app)\b",
+                        "Firebase Storage Bucket URL": r"\b[a-z0-9-]{4,64}\.(?:appspot\.com|firebasestorage\.app)\b",
+                        "Firebase Cloud Function URL": r"\b(?:[a-z0-9-]+\.a\.run\.app|[a-zA-Z0-9-]+\.cloudfunctions\.net\/[a-zA-Z0-9_-]+)\/?\b",
+
+                        "Cloudinary": r"\bcloudinary://[^\s\"']{10,200}",
+                        "Slack Token": r"\b(xox[pboa]-[0-9]{12}-[0-9]{12}-[0-9]{12}-[a-z0-9]{32})\b",
 
                         "RSA private key":       r"-----BEGIN RSA PRIVATE KEY-----",
                         "SSH (DSA) private key": r"-----BEGIN DSA PRIVATE KEY-----",
                         "SSH (EC) private key":  r"-----BEGIN EC PRIVATE KEY-----",
                         "PGP private key block": r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
 
-                        "Amazon AWS Access Key ID":        r"AWS_ACCESS_KEY_ID",
-                        "Amazon AWS Secret Access Key":    r"AWS_SECRET_ACCESS_KEY",
-                        "Amazon AWS S3 bucket":            r".+\.s3\..+\.amazonaws.com",
-                        "Amazon AWS Access Key ID":        r"AKIA[0-9A-Z]{16}",
-                        "Amazon MWS Auth Token":           r"amzn\.mws\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                        "Amazon AWS Lambda URL":           r"[a-z0-9]{32}\.lambda-url\.[a-z0-9-]+(?:\.localhost)?\.on\.aws(?:/.*)?$",
-                        "Amazon AWS Lambda Function Execute URL": r"(?P<api_id>[a-z0-9]+)\.execute-api\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/(?P<stage>[^/]+)",
+                        "Amazon AWS Access Key ID - Assignment": r"\bAWS_ACCESS_KEY_ID[\"']?\s*[:=>]\s*[\"']?(A[A-Z0-9]{19})\b",
+                        "Amazon AWS Access Key ID - Direct": r"\bAKIA[0-9A-Z]{16}\b",
+                        "Amazon AWS Secret Access Key":    r"\bAWS_SECRET_ACCESS_KEY[\"']?\s*[:=>]\s*[\"']?([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])",
+                        "Amazon AWS S3 bucket":            r"\b[a-z0-9.-]{3,63}\.s3\.[a-z0-9-]{3,20}\.amazonaws\.com\b",
+                        "Amazon MWS Auth Token":           r"\bamzn\.mws\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+                        "Amazon AWS Lambda URL":           r"\b[a-z0-9]{32}\.lambda-url\.[a-z0-9-]+(?:\.localhost)?\.on\.aws(?:/[^\s\"']{0,1024})?",
+                        "Amazon AWS Lambda Function Execute URL": r"\b(?P<api_id>[a-z0-9]{10})\.execute-api\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/(?P<stage>[^\s\"'/]{1,128})",
 
-                        "Facebook Access Token": r"EAACEdEose0cBA[0-9A-Za-z]+",
-                        "Facebook OAuth": r"[f|F][a|A][c|C][e|E][b|B][o|O][o|O][k|K].*['|\"][0-9a-f]{32}['|\"]",
-                        "GitHub": r"[g|G][i|I][t|T][h|H][u|U][b|B].*['|\"][0-9a-zA-Z]{35,40}['|\"]",
-                        "Generic API Key": r"[a|A][p|P][i|I][_]?[k|K][e|E][y|Y].*['|\"][0-9a-zA-Z]{32,45}['|\"]",
-                        "Generic Secret": r"[s|S][e|E][c|C][r|R][e|E][t|T].*['|\"][0-9a-zA-Z]{32,45}['|\"]",
+                        "Facebook Access Token": r"\bEAACEdEose0cBA[0-9A-Za-z]+\b",
+                        "Facebook OAuth": r"\bfacebook.{0,50}?['\"]\b([0-9a-f]{32})\b['\"]",
+                        "Facebook Secret": r"(?<=facebook_app_secret_token\"\>)[^<]+",
+                        "GitHub": r"\b(gh[pousr]_[a-zA-Z0-9]{36})\b",
+                        "GitHub Legacy": r"\bgithub.{0,50}?['\"]\b([a-zA-Z0-9]{40})\b['\"]",
+                        "Generic API Key": r"\bapi_?key[\"']?\s*[:=>]\s*['\"]\b([a-zA-Z0-9]{32,45})\b['\"]",
+                        "Generic Secret": r"\bsecret[\"']?\s*[:=>]\s*['\"]\b([a-zA-Z0-9]{32,45})\b['\"]",
+                        "Generic Secret": r"(?i)[^\"]*secret[^\"]*\">([^<]+)",
 
-                        "Google Cloud Function URL": r"(?:(?P<region>[a-z0-9-]+)-(?P<project>[a-z0-9-:]+)\.cloudfunctions\.net\/(?P<func_legacy>[a-zA-Z0-9_-]+)|(?P<run_name>[a-z0-9-]+)-(?P<run_hash>[a-z0-9]+)-(?P<run_region>[a-z0-9-]+)\.a\.run\.app)$",
-                        "Google API Key (Cloud Platform, Drive, Gmail, YouTube)":  r"AIza[0-9A-Za-z\-_]{35}",
-                        "Google OAuth (Cloud Platform, Drive, Gmail, YouTube)":    r"[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com",
-                        "Google (GCP) Service-account":                            r"\"type\": \"service_account\"",
-                        "Google OAuth Access Token":                               r"ya29\.[0-9A-Za-z\-_]+",
+                        "Google Cloud Function URL": r"\b(?:(?P<region>[a-z]+-[a-z0-9]+)-(?P<project>[a-z0-9-:]+)\.cloudfunctions\.net\/(?P<func_legacy>[a-zA-Z0-9_-]+)(?![a-zA-Z0-9_-])|(?P<run_name>[a-z0-9-]+)-(?P<run_hash>[a-z0-9]+)-(?P<run_region>[a-z]+-[a-z0-9]+)\.a\.run\.app\b)",
+                        "Google API Key (Cloud Platform, Drive, Gemini, Gmail, YouTube)":  r"\bAIza[0-9A-Za-z\-_]{35}\b",
+                        "Google OAuth (Cloud Platform, Drive, Gmail, YouTube)":    r"\b[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com\b",
+                        "Google (GCP) Service-account":                            r"\"type\"\s*:\s*\"service_account\"",
+                        "Google OAuth Access Token":                               r"\bya29\.[0-9A-Za-z\-_]+",
+                        "Google Storage Bucket":                                   r"\bgoogle_storage_bucket[\"']?[=>]?\s*[0-9a-zA-Z-\.]+\b",
+                        "Google App ID":                                           r"\bgoogle_app_id[\"']?[:=>]?\s*[0-9:a-zA-Z-\.]+\b",
 
-                        "Heroku API Key": r"[h|H][e|E][r|R][o|O][k|K][u|U].*[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
-                        "MailChimp API Key": r"[0-9a-f]{32}-us[0-9]{1,2}",
-                        "Mailgun API Key": r"key-[0-9a-zA-Z]{32}",
-                        "Password in URL": r"[a-zA-Z]{3,10}://[^/\s:@]{3,20}:[^/\s:@]{3,20}@.{1,100}[\"'\s]",
-                        "PayPal Braintree Access Token": r"access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}",
-                        "Picatic API Key": r"sk_live_[0-9a-z]{32}",
-                        "Slack Webhook": r"https://hooks.slack.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}",
-                        "Stripe API Key": r"sk_live_[0-9a-zA-Z]{24}",
-                        "Stripe Restricted API Key": r"rk_live_[0-9a-zA-Z]{24}",
-                        "Square Access Token": r"sq0atp-[0-9A-Za-z\-_]{22}",
-                        "Square OAuth Secret": r"sq0csp-[0-9A-Za-z\-_]{43}",
-                        "Twilio API Key": r"SK[0-9a-fA-F]{32}",
-                        "Twitter Access Token": r"[t|T][w|W][i|I][t|T][t|T][e|E][r|R].*[1-9][0-9]+-[0-9a-zA-Z]{40}",
-                        "Twitter OAuth": r"[t|T][w|W][i|I][t|T][t|T][e|E][r|R].*['|\"][0-9a-zA-Z]{35,44}['|\"]"
+                        "Heroku API Key": r"\bheroku[a-z0-9_]*[\"']?\s*[:=>]\s*[\"']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+                        "MailChimp API Key": r"\b[0-9a-f]{32}-us[0-9]{1,2}\b",
+                        "Mailgun API Key": r"\bkey-[0-9a-zA-Z]{32}\b",
+                        "Password in URL": r"\b[a-zA-Z]{3,10}://[^/\s:@]{3,20}:[^/\s:@]{3,20}@[^\s\"']{1,100}",
+                        "PayPal Braintree Access Token": r"\baccess_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}\b",
+                        "Picatic API Key": r"\bsk_live_[0-9a-z]{32}\b",
+                        "Slack Webhook": r"\bhttps://hooks\.slack\.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}\b",
+                        "Stripe API Key": r"\bsk_live_[0-9a-zA-Z]{24}\b",
+                        "Stripe Restricted API Key": r"\brk_live_[0-9a-zA-Z]{24}\b",
+                        "Square Access Token": r"\bsq0atp-[0-9A-Za-z\-_]{22}\b",
+                        "Square OAuth Secret": r"\bsq0csp-[0-9A-Za-z\-_]{43}\b",
+                        "Twilio API Key": r"\bSK[0-9a-fA-F]{32}\b",
+                        "Twitter Access Token": r"\btwitter[a-z0-9_]*[\"']?\s*[:=>]\s*[\"']?([1-9][0-9]+-[a-zA-Z0-9]{40})\b",
+                        "Twitter OAuth": r"\btwitter(?:[a-z0-9_]*(?:oauth|key|secret|token))?[\"']?\s*[:=>]\s*[\"']?([a-zA-Z0-9]{35,44})\b"
                     }
 
                     compiled_patterns = {
@@ -472,8 +535,15 @@ def static_analysis(package_name):
                             if matches:
                                 has_matches = True
                                 for match in matches:
-                                    match_lst.add(f"[{pname}] {match.group(0)}")
-                                    all_match_lst.add(f"[{pname}] {match.group(0)}")
+                                    extracted_value = match.group(0)
+                                    if len(match.groups()) >= 1 and match.group(1) is not None:
+                                        extracted_value = f"{match.group(0)} (match: {match.group(1)})"
+
+                                    match_lst.add(f"[{pname}] {extracted_value}")
+                                    all_match_lst.add(f"[{pname}] {extracted_value}")
+
+                                    #match_lst.add(f"[{pname}] {match.group(0)}")
+                                    #all_match_lst.add(f"[{pname}] {match.group(0)}")
 
                                     if 'private key' in pname:
                                         #print(f"DEBUG DEBUG DEBUG: found private key preamble in {f}")
@@ -490,7 +560,7 @@ def static_analysis(package_name):
                                         if f"{so_file}" not in bin_files_analyzed:
                                             bin_files_analyzed.add(f"{so_file}")
                                         else:
-                                            print(f"skipping {so_basename} (already analyzed)")
+                                            logger.info(f"skipping {so_basename} (already analyzed)")
                                             continue
 
                                         private_key_search_lst = [
@@ -506,7 +576,7 @@ def static_analysis(package_name):
                                             res = extract_private_keys(f"{so_file}", output_dir=f"{app_name}/extracted_private_keys")
 
                 if has_matches:
-                    print(f"{f}:")
+                    logger.info(f"{f}:")
                     for m in match_lst:
                         print(m)
 
@@ -517,11 +587,13 @@ def static_analysis(package_name):
                     fp.unlink(missing_ok=True)
 
         except Exception as e:
-            print(f"Error: {e}")
+            logger.error(f"Error: {e}")
 
     with open(f"{package_name}/unqiue.secrets.txt", "w", encoding="utf-8") as all_outfile:
          for l in all_match_lst:
-             all_outfile.write(f"{l}\n")
+             #keep only the last 1024 characters of the matched string, in case any regex is a bit too greedy...
+             smol_l = l[-1024:]
+             all_outfile.write(f"{smol_l}\n")
 
     prune_false_positives(f"{package_name}/unqiue.secrets.txt")
     pruned_results = ""
@@ -537,7 +609,7 @@ def static_analysis(package_name):
     return pruned_results
 
 class TargetDatabase:
-    def __init__(self, db_path="app_targets.db"):
+    def __init__(self, db_path="target_apps.db"):
         self.db_path = db_path
         self._init_db()
 
@@ -548,24 +620,110 @@ class TargetDatabase:
             # We use "APK name" as the PRIMARY KEY since it acts as the unique identifier
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS targets (
-                    "APK name" TEXT PRIMARY KEY,
-                    "Google Play Store Package URL" TEXT,
-                    "Organization Name" TEXT,
-                    "Website" TEXT,
-                    "Security Program" TEXT,
-                    "Security Program Details" TEXT,
-                    "Findings" TEXT
+                    "apk_name" TEXT PRIMARY KEY,
+                    "google_play_store_url" TEXT,
+                    "org_name" TEXT,
+                    "website" TEXT,
+                    "security_program" INTEGER DEFAULT 0,
+                    "security_program_details" TEXT,
+                    "security_program_url" TEXT,
+                    "installed" INTEGER DEFAULT 0,
+                    "downloaded" INTEGER DEFAULT 0,
+                    "install_date" TEXT,
+                    "findings" TEXT
                 )
             ''')
             conn.commit()
 
-    def get_target(self, apk_name):
-        """Retrieves a row by its APK name and converts JSON strings back to lists."""
+    def get_all_rows(self):
+        """
+        Retrieve all rows.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            cursor.execute('SELECT * FROM targets WHERE "APK name" = ?', (apk_name,))
+            query = """
+                SELECT
+                    apk_name,
+                    google_play_store_url,
+                    org_name,
+                    website,
+                    CASE WHEN security_program = 1 THEN 'Yes' ELSE 'No' END AS security_program,
+                    security_program_details,
+                    security_program_url,
+                    CASE WHEN installed = 1 THEN 'Yes' ELSE 'No' END AS installed,
+                    CASE WHEN downloaded = 1 THEN 'Yes' ELSE 'No' END AS downloaded,
+                    install_date,
+                    findings
+                FROM targets
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+
+            return rows
+
+    def get_rows_where(self, where=""):
+        """
+        Retrieve all rows that match the where clause.
+        """
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            query = """
+                SELECT
+                    apk_name,
+                    google_play_store_url,
+                    org_name,
+                    website,
+                    CASE WHEN security_program = 1 THEN 'Yes' ELSE 'No' END AS security_program,
+                    security_program_details,
+                    security_program_url,
+                    CASE WHEN installed = 1 THEN 'Yes' ELSE 'No' END AS installed,
+                    CASE WHEN downloaded = 1 THEN 'Yes' ELSE 'No' END AS downloaded,
+                    install_date,
+                    findings
+                FROM targets
+            """
+            if where:
+                query += f"WHERE {where}"
+
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+
+            return rows
+
+    def get_target(self, apk_name):
+        """
+        Retrieves a row by its APK name and converts JSON strings back to lists.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            query = """
+                SELECT
+                    apk_name,
+                    google_play_store_url,
+                    org_name,
+                    website,
+                    CASE WHEN security_program = 1 THEN 'Yes' ELSE 'No' END AS security_program,
+                    security_program_details,
+                    security_program_url,
+                    CASE WHEN installed = 1 THEN 'Yes' ELSE 'No' END AS installed,
+                    CASE WHEN downloaded = 1 THEN 'Yes' ELSE 'No' END AS downloaded,
+                    install_date,
+                    findings
+                FROM targets WHERE apk_name = ?
+            """
+            cursor.execute(query, (apk_name,))
+
             row = cursor.fetchone()
 
             if not row:
@@ -575,9 +733,9 @@ class TargetDatabase:
             result = dict(row)
 
             # Check if Findings contains data, and convert it back to a list
-            if result.get("Findings"):
+            if result.get("findings"):
                 try:
-                    result["Findings"] = json.loads(result["Findings"])
+                    result["findings"] = json.loads(result["findings"])
                 except json.JSONDecodeError:
                     # If it wasn't saved as JSON (e.g., old data), leave it as a string
                     pass
@@ -589,7 +747,7 @@ class TargetDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            cursor.execute('INSERT OR IGNORE INTO targets ("APK name") VALUES (?)', (apk_name,))
+            cursor.execute('INSERT OR IGNORE INTO targets ("apk_name") VALUES (?)', (apk_name,))
 
             if update_data:
                 columns = []
@@ -606,81 +764,108 @@ class TargetDatabase:
 
                 values.append(apk_name)
 
-                query = f'UPDATE targets SET {", ".join(columns)} WHERE "APK name" = ?'
+                query = f'UPDATE targets SET {", ".join(columns)} WHERE "apk_name" = ?'
                 cursor.execute(query, values)
 
             conn.commit()
 
-def display_database_records(db_path="app_targets.db", search_findings=None):
-    # search database for matches, or return all results
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    def delete_target(self, apk_name):
+        """Delete db entry by package name"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
 
-        # Retrieve all records from the database
-        cursor.execute("SELECT * FROM targets")
-        rows = cursor.fetchall()
+            query = f'DELETE FROM targets WHERE "apk_name" = ?'
+            cursor.execute(query, (apk_name,))
 
-        match_count = 0
+            conn.commit()
+            print(f"deleted pkg: {apk_name}")
 
-        for row in rows:
-            data = dict(row)
+def display_database_records(db, search_findings=None):
+    # show all results or match on search string
+    rows = db.get_all_rows()
 
-            # Parse the findings JSON string back into a Python list
-            raw_findings = data.get("Findings")
-            if raw_findings:
-                try:
-                    findings_list = json.loads(raw_findings)
-                except json.JSONDecodeError:
-                    # Fallback if old data was saved as a raw string instead of JSON
-                    findings_list = [raw_findings]
-            else:
-                findings_list = []
+    match_count = 0
 
-            # If a search term is provided, filter the results
-            if search_findings and search_findings.strip():
-                # Check if the search term exists in any of the findings (case-insensitive)
-                has_match = any(search_findings.lower() in f.lower() for f in findings_list)
-                if not has_match:
-                    continue  # Skip this database row entirely if there's no match
+    for row in rows:
+        data = dict(row)
+        findings_matches = []
 
-            match_count += 1
+        # Parse the findings JSON string back into a Python list
+        raw_findings = data.get("findings")
+        if raw_findings:
+            try:
+                findings_list = json.loads(raw_findings)
+            except json.JSONDecodeError:
+                # Fallback if old data was saved as a raw string instead of JSON
+                findings_list = [raw_findings]
+        else:
+            findings_list = []
 
-            # Extract fields, defaulting to "N/A" if they are empty/None
-            org_name = data.get("Organization Name") or "N/A"
-            org_website = data.get("Website") or "N/A"
-            appstore_url = data.get("Google Play Store Package URL") or "N/A"
-            security_program = data.get("Security Program") or "N/A"
+        # If a search term is provided, filter the results
+        if search_findings and search_findings.strip():
+            # Check if the search term exists in any of the findings (case-insensitive)
+            has_match = any(search_findings.lower() in f.lower() for f in findings_list)
+            if not has_match:
+                continue  # Skip this database row entirely if there's no match
 
-            # Clean up the details string so it doesn't break the single-line tabbed output
-            security_program_details = data.get("Security Program Details") or "N/A"
-            if security_program_details != "N/A":
-                security_program_details = security_program_details.replace("\n", " | ")
+        match_count += 1
+        if search_findings and has_match:
+            for f in findings_list:
+                if search_findings.lower() in f.lower():
+                    findings_matches.append(f)
 
-            # Print the formatted output
-            print(f"org_name: {org_name}\torg_website: https://{org_website}")
-            print(f"appstore_url: {appstore_url}\tsecurity_program: {security_program}\tsecurity_program_details: {security_program_details}")
-            print("Findings: ")
+        if not search_findings:
+            findings_matches = findings_list
 
-            if findings_list:
-                for f in findings_list:
-                    print(f"\t{f}", end="")
+        # Extract fields, defaulting to "N/A" if they are empty/None
+        apk_name = data.get("apk_name")
+        org_name = data.get("org_name") or "N/A"
+        org_website = data.get("website") or "N/A"
+        appstore_url = data.get("google_play_store_url") or "N/A"
+        security_program = data.get("security_program")
+        installed = data.get("installed")
+        downloaded = data.get("downloaded")
+        install_date = data.get("install_date") or "N/A"
 
-                # Ensure the block ends cleanly even if the last finding lacked a \n
-                if not findings_list[-1].endswith("\n"):
-                    print()
-            else:
-                print("\tNone")
+        # Clean up the details string so it doesn't break the single-line tabbed output
+        security_program_details = data.get("security_program_details") or "N/A"
+        if security_program_details != "N/A":
+            security_program_details = security_program_details.replace("\n", " | ")
 
-            print("-" * 80) # Visual separator between apps
+        # Print the formatted output
+        print(f"org_name: {org_name}\torg_website: {org_website}")
+        #print(f"installed: {installed}\tinstall_date: {install_date}\tdownloaded: {downloaded}")
+        print(f"appstore_url: {appstore_url}\tsecurity_program: {security_program}") #\tsecurity_program_details: {security_program_details}")
+        print("Findings: ")
 
-        print(f"Total records displayed: {match_count}")
+        if len(findings_matches) > 0:
+            for f in findings_matches:
+                print(f"\t{f}", end="")
+            if not findings_matches[-1].endswith("\n"):
+                print()
+        else:
+            print("\tNone")
+
+        #if findings_list:
+        #    for f in findings_list:
+        #        print(f"\t{f}", end="")
+        #
+        #    # Ensure the block ends cleanly even if the last finding lacked a \n
+        #    if not findings_list[-1].endswith("\n"):
+        #        print()
+        #else:
+        #    print("\tNone")
+
+        print("-" * 80) # Visual separator between apps
+
+    print(f"Total apps with matches: {match_count}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--start-date", help="The beginning install date of the APKs you want to process")
-    parser.add_argument("--end-date", help="The end install date of the APKs you want to process")
+    parser.add_argument("--start-date", type=str, default=None, help="The beginning install date of the APKs you want to process")
+    parser.add_argument("--end-date", type=str, default=None, help="The end install date of the APKs you want to process")
     parser.add_argument("-f", "--find-apks", action="store_true", help="Find APKs")
+    parser.add_argument("-i", "--install-apks", type=str, nargs='?', const="", default=None, help="Install specified APKs on the connected smartphone via the Google Play Store. This option will install all APKs in the database where Installed=0 unless you specify a list of package names delimted by a comma.")
     parser.add_argument("-d", "--download-apks", action="store_true", help="Download APKs")
     parser.add_argument("-a", "--analyze-apks", action="store_true", help="Analyze APKs")
     parser.add_argument("-g", "--get-apk-info", action="store_true", help="Retrieve app developer info from Play Store")
@@ -688,33 +873,33 @@ def main():
 
     db = TargetDatabase("target_apps.db")
 
+    today = date.today()
+
     processed_pkgs = 0
     matching_packages = []
 
     args = parser.parse_args()
 
     if args.search_findings is not None:
-        display_database_records("target_apps.db", search_findings=args.search_findings)
+        display_database_records(db, search_findings=args.search_findings)
         return
 
-    if args.start_date:
+    if args.start_date is not None:
         dt_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
     else:
         dt_date = date.today()
     START_DATE = datetime.combine(dt_date, time(0,0,0))
-    #print(f"start date: {str(START_DATE)}")
 
-    if args.end_date:
+    if args.end_date is not None:
         dt_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
     else:
         dt_date = date.today()
     END_DATE = datetime.combine(dt_date, time(23, 23, 59))
-    #print(f"end date: {str(END_DATE)}")
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
     log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler = logging.FileHandler('batch_apk_static_analysis.log', mode='a')
+    file_handler = logging.FileHandler(f"{str(today)}-batch_apk_static_analysis.log", mode='a')
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(log_format)
     console_handler = logging.StreamHandler()
@@ -724,7 +909,7 @@ def main():
     logger.addHandler(console_handler)
 
     if args.find_apks:
-        # find APKs within specified date range
+        # find APKs installed on the phone within specified date range
         matching_packages = get_installed_packages_in_range(START_DATE, END_DATE)
         total_pkgs = len(matching_packages)
 
@@ -737,9 +922,26 @@ def main():
         for pkg, install_time in matching_packages:
             logger.info(f" - {pkg} (Installed: {install_time})")
 
+            db.set_target(str(pkg), {
+                "installed": 1,
+                "install_date": args.start_date
+            })
+
         logger.info(f"\nFound {total_pkgs} package(s) in timeframe:")
+        return
+
+    if args.install_apks is not None:
+        install_apks(db, pkg_list=args.install_apks)
+        return
 
     if args.download_apks:
+        if args.start_date is None and args.end_date is None:
+            #default to downloading all packages from the phone listed in db where downloaded=0
+            rows = db.get_rows_where("downloaded=0")
+            if rows:
+                matching_packages = [(row["apk_name"],row["install_date"]) for row in rows]
+                total_pkgs = len(matching_packages)
+
         # download APKs within specified date range
         logger.info("\n--- Starting Downloads ---")
         for pkg, _ in matching_packages:
@@ -751,16 +953,22 @@ def main():
             if dl_result:
                 logger.info("downloaded package!")
 
+            db.set_target(str(pkg), {
+                "downloaded": 1
+            })
+        return
+
     if args.analyze_apks:
         # Analyze all APKs within matching_packages (date) range
         logger.info("\n--- Starting Analysis ---")
 
         if not args.find_apks:
-            #default to any APK that hasn't been analyzed yet.
+            #default to any APK that is downloaded but hasn't been analyzed yet.
+            # @TODO: should this be replaced with a db lookup on a new column named 'analyzed' instead of a filesystem search?
             directory_path = Path('.')
             subdirs = [x for x in directory_path.iterdir() if x.is_dir()]
             for d in subdirs:
-                if d != Path('results') and d != Path('__pycache__') and d != Path('venv'):
+                if not str(d).startswith('results') and d != Path('__pycache__') and d != Path('venv') and d != Path('.git'):
                     matching_packages.append([d, str(START_DATE)])
 
         for pkg, _ in matching_packages:
@@ -777,22 +985,24 @@ def main():
             logger.info(f"org_name: {org_name}\torg_website: {org_website}\tappstore_url: {appstore_url}\tsecurity_program: {security_program}\tsecurity_program_details: {security_program_details}")
             logger.info(f"Findings: ")
             for f in findings:
-                logger.info(f"\t{f}", end="")
+                logger.info(f"\t{f}".strip())
 
             db.set_target(str(pkg), {
-                "Google Play Store Package URL": appstore_url,
-                "Organization Name": org_name,
-                "Website": org_website,
-                "Security Program": security_program,
-                "Security Program Details": security_program_details,
-                "Findings": findings
+                "google_play_store_url": appstore_url,
+                "org_name": org_name,
+                "website": org_website,
+                "security_program": security_program,
+                "security_program_details": security_program_details,
+                "findings": findings
             })
+        return
 
     logger.info("done!")
     logger.removeHandler(file_handler)
     file_handler.close()
-    prune_false_positives("batch_apk_static_analysis.log")
+    prune_false_positives(f"{today}-batch_apk_static_analysis.log")
 
 
 if __name__ == "__main__":
     main()
+    shutil.rmtree("__pycache__")
